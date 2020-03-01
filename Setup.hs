@@ -18,6 +18,7 @@ import Distribution.Simple.Program.Ld
 import Distribution.Simple.Register
 import Distribution.Simple.Setup
 import Distribution.Simple.Utils
+import Distribution.System
 import Distribution.Text
 import Distribution.Types.CondTree
 import Distribution.Types.LocalBuildInfo
@@ -140,20 +141,21 @@ mkGHCiFixLibPkgId pkgDesc =
       name = unPackageName $ pkgName pid
   in pid {pkgName = mkPackageName $ "cbits-" ++ name}
 
-mkGHCiFixLibName :: PackageDescription -> String
-mkGHCiFixLibName pkgDesc =
-  ("lib" ++ display (mkGHCiFixLibPkgId pkgDesc)) <.> dllExtension
+mkGHCiFixLibName :: PackageDescription -> Platform -> String
+mkGHCiFixLibName pkgDesc platform =
+  ("lib" ++ display (mkGHCiFixLibPkgId pkgDesc)) <.> dllExtension platform
 
-mkGHCiFixLibRefName :: PackageDescription -> String
-mkGHCiFixLibRefName pkgDesc =
+mkGHCiFixLibRefName :: PackageDescription -> Platform -> String
+mkGHCiFixLibRefName pkgDesc platform =
   prefix ++ display (mkGHCiFixLibPkgId pkgDesc)
-  where prefix = if dllExtension == "dll" then "lib" else ""
+  where prefix = if dllExtension platform == "dll" then "lib" else ""
 
 buildGHCiFix ::
   Verbosity -> PackageDescription -> LocalBuildInfo -> Library -> IO ()
 buildGHCiFix verb pkgDesc lbi lib =
   let bDir   = buildDir lbi
-      clbis  = componentNameCLBIs lbi CLibName
+      clbis  = componentNameCLBIs lbi (CLibName $ libName lib)
+      platform = hostPlatform lbi
   in flip mapM_ clbis $ \clbi -> do
     let ms     = map ModuleName.toFilePath $ allLibModules lib clbi
         hsObjs = map ((bDir </>) . (<.> "o")) ms
@@ -161,11 +163,11 @@ buildGHCiFix verb pkgDesc lbi lib =
     stubObjs <- fmap catMaybes $
       mapM (findFileWithExtension ["o"] [bDir]) $ map (++ "_stub") ms
     (ld,_) <- requireProgram verb ldProgram (withPrograms lbi)
-    combineObjectFiles verb ld (bDir </> lname <.> "o") (stubObjs ++ hsObjs)
+    combineObjectFiles verb lbi ld (bDir </> lname <.> "o") (stubObjs ++ hsObjs)
     (ghc,_) <- requireProgram verb ghcProgram (withPrograms lbi)
     let bi = libBuildInfo lib
     runProgram verb ghc (
-      ["-shared","-o",bDir </> (mkGHCiFixLibName pkgDesc)] ++
+      ["-shared","-o",bDir </> (mkGHCiFixLibName pkgDesc platform)] ++
       (ldOptions bi) ++ (map ("-l" ++) $ extraLibs bi) ++
       (map ("-L" ++) $ extraLibDirs bi) ++
       (map ((bDir </>) . flip replaceExtension objExtension) $ cSources bi))
@@ -177,13 +179,14 @@ mocProgram = Program {
   programFindLocation = \verb search ->
     fmap msum $ mapM (findProgramOnSearchPath verb search) ["moc-qt5", "moc"],
   programFindVersion = \verb path -> do
-    (oLine,eLine,_) <-
-      rawSystemStdInOut verb path ["-v"] Nothing Nothing Nothing False
+    (IODataText oLine,eLine,_) <-
+      rawSystemStdInOut verb path ["-v"] Nothing Nothing Nothing IODataModeText
     return $
       msum (map (\(p,l) -> findSubseq (stripPrefix p) l)
         [("(Qt ",eLine), ("moc-qt5 ",oLine), ("moc ",oLine)]) >>=
       simpleParse . takeWhile (\c -> isDigit c || c == '.'),
-  programPostConf = \_ c -> return c
+  programPostConf = \_ c -> return c,
+  programNormaliseArgs = \_ _ args -> args
 }
 
 qtVersionRange :: VersionRange
@@ -198,7 +201,7 @@ copyWithQt pkgDesc lbi hooks flags = do
       dest = fromFlag $ copyDest flags
       bDir = buildDir lbi
       instDirs = absoluteInstallDirs pkgDesc lbi dest
-      file = mkGHCiFixLibName pkgDesc
+      file = mkGHCiFixLibName pkgDesc (hostPlatform lbi)
   when (needsGHCiFix pkgDesc lbi) $ do
     installOrdinaryFile verb (bDir </> file) (dynlibdir instDirs </> file)
     -- Stack looks in the non-dyn lib directory
@@ -212,7 +215,7 @@ regWithQt pkg@PackageDescription { library = Just lib } lbi _ flags = do
       dist    = fromFlag $ regDistPref flags
       reloc   = relocatable lbi
       pkgDb   = withPackageDB lbi
-      clbis   = componentNameCLBIs lbi CLibName
+      clbis   = componentNameCLBIs lbi (CLibName $ libName lib)
   regDb <- fmap registrationPackageDB $ absolutePackageDBPaths pkgDb
   flip mapM_ clbis $ \clbi -> do
     instPkgInfo <-
@@ -220,7 +223,7 @@ regWithQt pkg@PackageDescription { library = Just lib } lbi _ flags = do
     let instPkgInfo' = instPkgInfo {
           -- Add extra library for GHCi workaround
           I.extraGHCiLibraries =
-            (if needsGHCiFix pkg lbi then [mkGHCiFixLibRefName pkg] else []) ++
+            (if needsGHCiFix pkg lbi then [mkGHCiFixLibRefName pkg (hostPlatform lbi)] else []) ++
               I.extraGHCiLibraries instPkgInfo,
           -- Add directories to framework search path
           I.frameworkDirs =
