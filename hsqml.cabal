@@ -11,6 +11,9 @@ Stability:          experimental
 Homepage:           http://www.gekkou.co.uk/software/hsqml/
 Category:           Graphics, GUI
 Synopsis:           Haskell binding for Qt Quick
+
+Tested-with: GHC==8.8.3, GHC==8.6.5
+
 Extra-source-files:
     README CHANGELOG
     cbits/*.cpp cbits/*.h test/Graphics/QML/Test/*.hs
